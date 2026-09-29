@@ -16,10 +16,33 @@ curl --data '{"hook_event_name":"Stop","session_id":"x","cwd":"/tmp"}' localhost
 
 ## Behaviour
 
-- `Stop` / `Notification` → session marked waiting (icon flashes, status `NeedsAttention`).
+- `Stop`, `StopFailure`, and `Notification` whose `notification_type` needs the user
+  (`permission_prompt`, `idle_prompt`, `elicitation_dialog`, `elicitation_url_dialog`,
+  `agent_needs_input`, or missing) → session marked waiting (icon flashes, status `NeedsAttention`).
+- Other notification types (`auth_success`, `agent_completed`, …) → ignored.
 - Any other event from that session → cleared. Left-click clears all; menu dismisses one.
-- 200 for an understood event, 400 otherwise. Body capped at 1 MiB.
+- 200 with empty body for an understood event (Claude Code treats that as plain success),
+  400 otherwise (a non-blocking hook error). Never return a body: a JSON body would be parsed as a
+  hook decision. Body capped at 1 MiB.
 - Menu "Copy address for agent" copies `http://<listen>` via Klipper D-Bus (`org.kde.klipper`).
+
+## Hook setup (per https://code.claude.com/docs/en/hooks)
+
+Use native `http` hooks, not curl. Set a short `timeout`: the default is 600 s, and these hooks run
+synchronously. `PostToolUse` clears the flash once a permission prompt is approved.
+
+```json
+{
+  "hooks": {
+    "Stop":             [{"hooks": [{"type": "http", "url": "http://HOST:9876", "timeout": 2}]}],
+    "StopFailure":      [{"hooks": [{"type": "http", "url": "http://HOST:9876", "timeout": 2}]}],
+    "Notification":     [{"hooks": [{"type": "http", "url": "http://HOST:9876", "timeout": 2}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "http", "url": "http://HOST:9876", "timeout": 2}]}],
+    "PostToolUse":      [{"hooks": [{"type": "http", "url": "http://HOST:9876", "timeout": 2}]}],
+    "SessionEnd":       [{"hooks": [{"type": "http", "url": "http://HOST:9876", "timeout": 2}]}]
+  }
+}
+```
 
 ## Config
 

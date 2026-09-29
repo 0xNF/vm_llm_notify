@@ -56,16 +56,22 @@ impl Tray {
         let (Some(name), Some(id)) = (event["hook_event_name"].as_str(), event["session_id"].as_str()) else {
             return false;
         };
-        match name {
-            "Stop" | "Notification" => {
-                log::info!("{name}: session {id} waiting");
-                let cwd = event["cwd"].as_str().unwrap_or(id);
-                self.waiting.insert(id.into(), cwd.into());
-            }
+        let waits = match name {
+            "Stop" | "StopFailure" => true,
+            // Only the notification types that need the user; a missing type counts as needing them.
+            "Notification" => match event["notification_type"].as_str() {
+                None | Some("permission_prompt" | "idle_prompt" | "elicitation_dialog" | "elicitation_url_dialog" | "agent_needs_input") => true,
+                Some(_) => return true,
+            },
             // ponytail: any other event from a session means it's busy again (or gone)
-            _ => {
-                self.waiting.remove(id);
-            }
+            _ => false,
+        };
+        if waits {
+            log::info!("{name}: session {id} waiting");
+            let cwd = event["cwd"].as_str().unwrap_or(id);
+            self.waiting.insert(id.into(), cwd.into());
+        } else {
+            self.waiting.remove(id);
         }
         true
     }
@@ -232,6 +238,11 @@ fn stop_then_prompt() {
     assert!(t.handle(&ev("UserPromptSubmit")));
     assert!(t.waiting.is_empty());
     assert!(!t.handle(&serde_json::json!({"foo": 1})));
+    let note = |ty: &str| serde_json::json!({"hook_event_name": "Notification", "notification_type": ty, "session_id": "s1"});
+    assert!(t.handle(&note("auth_success")));
+    assert!(t.waiting.is_empty());
+    assert!(t.handle(&note("permission_prompt")));
+    assert!(t.waiting.contains_key("s1"));
 }
 
 #[test]
