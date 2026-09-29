@@ -12,3 +12,4 @@ serde_json = "1.0.151"
 syslog = "7.0.0"
 tiny_http = "0.12.0"
 xdg = "3.0.0"
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }

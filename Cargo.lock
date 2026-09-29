@@ -995,6 +995,7 @@ dependencies = [
  "syslog",
  "tiny_http",
  "xdg",
+ "zbus",
 ]
 
 [[package]]

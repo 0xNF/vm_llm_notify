@@ -46,6 +46,8 @@ struct Tray {
     /// session_id -> cwd of sessions waiting for the user
     waiting: BTreeMap<String, String>,
     blink: bool,
+    /// URL agents should POST hook events to
+    url: String,
 }
 
 impl Tray {
@@ -112,6 +114,16 @@ impl ksni::Tray for Tray {
             })
             .collect();
         items.push(ksni::MenuItem::Separator);
+        let url = self.url.clone();
+        items.push(
+            StandardItem {
+                label: "Copy address for agent".into(),
+                icon_name: "edit-copy".into(),
+                activate: Box::new(move |_| copy_to_clipboard(url.clone())),
+                ..Default::default()
+            }
+            .into(),
+        );
         items.push(
             StandardItem {
                 label: "Quit".into(),
@@ -125,8 +137,59 @@ impl ksni::Tray for Tray {
     }
 }
 
+/// `log` backend writing RFC 5424 to the local syslog socket; syslog's own `init` only does RFC 3164.
+struct Syslog5424(std::sync::Mutex<syslog::Logger<syslog::LoggerBackend, syslog::Formatter5424>>);
+
+impl log::Log for Syslog5424 {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        m.level() <= log::max_level()
+    }
+    fn log(&self, r: &log::Record) {
+        if !self.enabled(r.metadata()) {
+            return;
+        }
+        // (MSGID, STRUCTURED-DATA, MSG); the crate types MSGID as u32
+        let msg = (0, BTreeMap::new(), r.args().to_string());
+        let Ok(mut l) = self.0.lock() else { return };
+        let _ = match r.level() {
+            log::Level::Error => l.err(msg),
+            log::Level::Warn => l.warning(msg),
+            log::Level::Info => l.info(msg),
+            log::Level::Debug | log::Level::Trace => l.debug(msg),
+        };
+    }
+    fn flush(&self) {}
+}
+
+fn init_syslog() -> Result<(), String> {
+    let formatter = syslog::Formatter5424 {
+        facility: syslog::Facility::LOG_USER,
+        hostname: std::fs::read_to_string("/proc/sys/kernel/hostname").ok().map(|h| h.trim().into()),
+        process: APP.into(),
+        pid: std::process::id(),
+    };
+    let logger = syslog::unix(formatter).map_err(|e| e.to_string())?;
+    log::set_boxed_logger(Box::new(Syslog5424(logger.into()))).map_err(|e| e.to_string())?;
+    log::set_max_level(log::LevelFilter::Info);
+    Ok(())
+}
+
+/// ponytail: KDE-only via Klipper's D-Bus API, fine for a KDE tray app
+fn copy_to_clipboard(text: String) {
+    // own thread: don't block ksni's D-Bus dispatch with a nested D-Bus call
+    thread::spawn(move || {
+        let r = zbus::blocking::Connection::session().and_then(|c| {
+            c.call_method(Some("org.kde.klipper"), "/klipper", Some("org.kde.klipper.klipper"), "setClipboardContents", &(text.as_str(),))
+        });
+        match r {
+            Ok(_) => log::info!("copied {text} to clipboard"),
+            Err(e) => log::error!("copying to clipboard via Klipper failed: {e}"),
+        }
+    });
+}
+
 fn main() {
-    if let Err(e) = syslog::init(syslog::Facility::LOG_USER, log::LevelFilter::Info, Some(APP)) {
+    if let Err(e) = init_syslog() {
         eprintln!("syslog unavailable, logging disabled: {e}");
     }
     if let Err(e) = run() {
@@ -138,7 +201,7 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let addr = load_config(std::env::args_os(), read_config_file()?);
-    let tray = Tray::default().spawn().map_err(|e| format!("failed to register tray icon: {e}"))?;
+    let tray = Tray { url: format!("http://{addr}"), ..Default::default() }.spawn().map_err(|e| format!("failed to register tray icon: {e}"))?;
     let server = tiny_http::Server::http(&addr).map_err(|e| format!("failed to bind {addr}: {e}"))?;
     log::info!("listening on {addr}");
 
