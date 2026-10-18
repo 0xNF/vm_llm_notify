@@ -43,8 +43,8 @@ fn read_config_file() -> Result<FileConfig, String> {
 
 #[derive(Default)]
 struct Tray {
-    /// session_id -> cwd of sessions waiting for the user
-    waiting: BTreeMap<String, String>,
+    /// session_id -> (cwd, why) of sessions waiting for the user
+    waiting: BTreeMap<String, (String, String)>,
     blink: bool,
     /// URL agents should POST hook events to
     url: String,
@@ -69,7 +69,12 @@ impl Tray {
         if waits {
             log::info!("{name}: session {id} waiting");
             let cwd = event["cwd"].as_str().unwrap_or(id);
-            self.waiting.insert(id.into(), cwd.into());
+            let why = match name {
+                "Stop" => "Finished, waiting for you".to_string(),
+                "StopFailure" => format!("Stopped with error: {}", event["error"].as_str().unwrap_or("unknown")),
+                _ => event["message"].as_str().unwrap_or("Needs your attention").to_string(),
+            };
+            self.waiting.insert(id.into(), (cwd.into(), why));
         } else {
             self.waiting.remove(id);
         }
@@ -94,7 +99,8 @@ impl ksni::Tray for Tray {
         let description = if self.waiting.is_empty() {
             "No sessions waiting".into()
         } else {
-            self.waiting.values().cloned().collect::<Vec<_>>().join("\n")
+            let project = |cwd: &str| cwd.rsplit('/').find(|s| !s.is_empty()).unwrap_or(cwd).to_string();
+            self.waiting.values().map(|(cwd, why)| format!("{}: {why}", project(cwd))).collect::<Vec<_>>().join("\n")
         };
         ksni::ToolTip { title: "Claude Code".into(), description, ..Default::default() }
     }
@@ -107,7 +113,7 @@ impl ksni::Tray for Tray {
         let mut items: Vec<ksni::MenuItem<Self>> = self
             .waiting
             .iter()
-            .map(|(id, cwd)| {
+            .map(|(id, (cwd, _))| {
                 let id = id.clone();
                 StandardItem {
                     label: format!("Dismiss {cwd}"),
@@ -234,7 +240,7 @@ fn stop_then_prompt() {
     let mut t = Tray::default();
     let ev = |name: &str| serde_json::json!({"hook_event_name": name, "session_id": "s1", "cwd": "/w"});
     assert!(t.handle(&ev("Stop")));
-    assert_eq!(t.waiting.get("s1").map(String::as_str), Some("/w"));
+    assert_eq!(t.waiting.get("s1"), Some(&("/w".to_string(), "Finished, waiting for you".to_string())));
     assert!(t.handle(&ev("UserPromptSubmit")));
     assert!(t.waiting.is_empty());
     assert!(!t.handle(&serde_json::json!({"foo": 1})));
@@ -243,6 +249,10 @@ fn stop_then_prompt() {
     assert!(t.waiting.is_empty());
     assert!(t.handle(&note("permission_prompt")));
     assert!(t.waiting.contains_key("s1"));
+    let q = serde_json::json!({"hook_event_name": "Notification", "notification_type": "elicitation_dialog", "session_id": "s2", "cwd": "/a/proj", "message": "Which DB?"});
+    assert!(t.handle(&q));
+    assert_eq!(t.waiting["s2"].1, "Which DB?");
+    assert!(ksni::Tray::tool_tip(&t).description.contains("proj: Which DB?"));
 }
 
 #[test]
